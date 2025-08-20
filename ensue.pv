@@ -1,0 +1,163 @@
+free offc: channel.
+free useraction: channel.
+free bb: channel.
+free c: channel.
+
+type amount.
+type read_id.
+
+fun add(amount, amount): amount.
+fun sub(amount, amount): amount.
+const zero: amount.
+
+type skey.
+type pkey.
+type rand.
+type signature.
+
+fun pk(skey): pkey.
+fun sign(skey,bitstring,rand): signature.
+reduc forall m: bitstring, sk: skey, r: rand; sigCheck(pk(sk), sign(sk, m, r)) = m.
+
+event evStartRead.
+event evSentSig.
+event evReceivedSig.
+event evCompleteRead.
+
+query event(evCompleteRead) ==> event(evStartRead).
+query event(evCompleteRead) ==> event(evReceivedSig).
+
+type user_msg.
+const USER_START_READ: user_msg.
+
+type server_msg.
+const DEPOSIT: server_msg.
+const WITHDRAW: server_msg.
+const TRANSFER: server_msg.
+const CHECK_BALANCE: server_msg.
+const SUCCESS: server_msg.
+const INSUFFICIENT_FUNDS: server_msg.
+const SERVER_REQUEST_READ: server_msg.
+
+
+let userA(pkA: pkey, skA: skey, pkB: pkey) = !(
+    in(useraction, command: user_msg);
+
+    if command = USER_START_READ then (
+       in(useraction, readreq: bitstring);
+       new rid: read_id;
+       new r: rand;
+       let sig = sign(skA,(rid,readreq),r) in
+       event evStartRead;
+       out(bb, SERVER_REQUEST_READ);
+       out(bb, (pkA,rid,readreq,sig));
+       event evSentSig
+    )
+  ).
+
+let storageproviderB(pkB: pkey, skB: skey, pkA: pkey) = !(
+    in(offc, (readreq: bitstring, sig: signature));
+    event evReceivedSig;
+    if sigCheck(pkA,sig) = readreq then
+        event evCompleteRead
+    else
+        0
+  ).
+
+
+(* Blockchain state *)
+table balances(pkey, amount).
+table requested_reads(pkey, read_id).
+
+(* Blockchain server process *)
+let blockchain_server() =
+    !(
+        in(bb, command: server_msg);
+
+        if command = DEPOSIT then (
+            in(bb, (pk: pkey, amt: amount));
+            get balances(=pk, current_balance) in (
+                let new_balance = add(current_balance, amt) in
+                insert balances(pk, new_balance);
+                out(bb, SUCCESS)
+            ) else (
+                (* First deposit for this account *)
+                insert balances(pk, amt);
+                out(bb, SUCCESS)
+            )
+        ) else if command = WITHDRAW then (
+            in(bb, (pk: pkey, amt: amount));
+            get balances(=pk, current_balance) in (
+                (* Check if sufficient funds *)
+                if current_balance = add(amt, zero) || current_balance = add(amt, current_balance) then (
+                    let new_balance = sub(current_balance, amt) in
+                    insert balances(pk, new_balance);
+                    out(bb, SUCCESS)
+                ) else (
+                    out(bb, INSUFFICIENT_FUNDS)
+                )
+            ) else (
+                out(bb, INSUFFICIENT_FUNDS)
+            )
+        ) else if command = TRANSFER then (
+            in(bb, (from_pk: pkey, to_pk: pkey, amt: amount));
+            get balances(=from_pk, from_balance) in (
+                (* Check if sufficient funds *)
+                if from_balance = add(amt, zero) || from_balance = add(amt, from_balance) then (
+                    get balances(=to_pk, to_balance) in (
+                        let new_from_balance = sub(from_balance, amt) in
+                        let new_to_balance = add(to_balance, amt) in
+                        insert balances(from_pk, new_from_balance);
+                        insert balances(to_pk, new_to_balance);
+                        out(bb, SUCCESS)
+                    ) else (
+                        (* First deposit for recipient *)
+                        let new_from_balance = sub(from_balance, amt) in
+                        insert balances(from_pk, new_from_balance);
+                        insert balances(to_pk, amt);
+                        out(bb, SUCCESS)
+                    )
+                ) else (
+                    out(bb, INSUFFICIENT_FUNDS)
+                )
+            ) else (
+                out(bb, INSUFFICIENT_FUNDS)
+            )
+        ) else if command = CHECK_BALANCE then (
+            in(bb, pk: pkey);
+            get balances(=pk, balance) in (
+                out(bb, balance)
+            ) else (
+                out(bb, zero)
+            )
+        ) else if command = SERVER_REQUEST_READ then (
+            in(bb, (pkA: pkey, rid:read_id, readreq:bitstring, sig:signature));
+            event evReceivedSig;
+            if sigCheck(pkA,sig) = (rid,readreq) then
+              insert requested_reads(pkA, rid);
+              event evCompleteRead
+            else
+              0
+        )
+).
+
+let userATest(pkA: pkey, skA: skey, pkB: pkey) =
+    event evStartRead;
+    event evCompleteRead;
+    in(useraction, readreq: bitstring);
+    out(offc, readreq).
+
+
+let serverBTest(pkB: pkey, skB: skey, pkA: pkey) =
+    in(offc, readreq: bitstring);
+    0.
+
+
+
+process
+    new skA: skey;
+    new skB: skey;
+    let pkA = pk(skA) in out(bb, pkA);
+    let pkB = pk(skB) in out(bb, pkB);
+    ( userA(pkA,skA,pkB) | storageproviderB(pkB,skB,pkA) | blockchain_server() )
+    (*( (!userATest(pkA,skA,pkB)) | (!serverBTest(pkB,skB,pkA)) )*)
